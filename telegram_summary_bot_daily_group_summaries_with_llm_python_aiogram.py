@@ -168,6 +168,9 @@ async def call_llm(prompt: str, model: Optional[str] = None, max_retries: int = 
                     
                     # Обработка 429 (Too Many Requests) с retry
                     if r.status_code == 429:
+                        # Детальное логирование для диагностики
+                        log_rate_limit_details(r, model=model, attempt=attempt + 1, context="in call_llm")
+                        
                         if attempt < max_retries - 1:
                             # Exponential backoff: 2^attempt секунд, но не более 60 секунд
                             wait_time = min(2 ** attempt, 60)
@@ -176,12 +179,15 @@ async def call_llm(prompt: str, model: Optional[str] = None, max_retries: int = 
                             if retry_after:
                                 try:
                                     wait_time = int(retry_after)
+                                    logger.info(f"Using Retry-After header value: {wait_time} seconds")
                                 except ValueError:
-                                    pass
+                                    logger.warning(f"Invalid Retry-After value: {retry_after}, using exponential backoff")
                             logger.warning(f"Rate limit hit (429). Retrying in {wait_time} seconds... (attempt {attempt + 1}/{max_retries})")
                             await asyncio.sleep(wait_time)
                             continue
                         else:
+                            # Все попытки исчерпаны - логируем финальную ошибку
+                            logger.error(f"All retry attempts exhausted for rate limit 429. Model: {model}")
                             # Все попытки исчерпаны - вызываем raise_for_status для правильного HTTPStatusError
                             r.raise_for_status()
                     
@@ -221,6 +227,48 @@ async def call_llm(prompt: str, model: Optional[str] = None, max_retries: int = 
         raise NotImplementedError(f"LLM provider {LLM_PROVIDER} not implemented in this sample")
 
 # -------------------- Helpers --------------------
+def log_rate_limit_details(response, model: str = "", attempt: int = 0, context: str = ""):
+    """Логирует детальную информацию о rate limit ошибке 429"""
+    retry_after = response.headers.get("Retry-After")
+    x_ratelimit_limit = response.headers.get("x-ratelimit-limit")
+    x_ratelimit_remaining = response.headers.get("x-ratelimit-remaining")
+    x_ratelimit_reset = response.headers.get("x-ratelimit-reset")
+    x_ratelimit_reset_requests = response.headers.get("x-ratelimit-reset-requests")
+    
+    # Пытаемся получить тело ответа для дополнительной информации
+    error_body = ""
+    try:
+        # Пытаемся получить как JSON (предпочтительно)
+        try:
+            error_data = response.json()
+            error_body = str(error_data)[:500]
+        except:
+            # Если не JSON, пытаемся прочитать как текст
+            try:
+                if hasattr(response, 'text'):
+                    error_body = response.text[:500] if response.text else "No response body"
+                elif hasattr(response, 'content'):
+                    error_body = response.content.decode('utf-8', errors='ignore')[:500] if response.content else "No response body"
+                else:
+                    error_body = "Could not read response body"
+            except:
+                error_body = "Could not read response body"
+    except Exception as read_err:
+        error_body = f"Error reading response: {str(read_err)[:200]}"
+    
+    log_msg = (
+        f"Rate limit 429 details {context}: "
+        f"Model: {model or 'unknown'}, "
+        f"Attempt: {attempt}, "
+        f"Retry-After: {retry_after or 'not provided'}, "
+        f"Rate-Limit-Limit: {x_ratelimit_limit or 'unknown'}, "
+        f"Rate-Limit-Remaining: {x_ratelimit_remaining or 'unknown'}, "
+        f"Rate-Limit-Reset: {x_ratelimit_reset or 'unknown'}, "
+        f"Rate-Limit-Reset-Requests: {x_ratelimit_reset_requests or 'unknown'}, "
+        f"Response body: {error_body[:200]}"
+    )
+    logger.error(log_msg)
+
 IGNORE_PATTERNS = [
     r"^/",  # commands
     r"^!",  # other bots
@@ -386,6 +434,9 @@ async def post_daily_summary(chat_id: int):
         except HTTPStatusError as e:
             error_msg = ""
             if e.response.status_code == 429:
+                # Детальное логирование для диагностики
+                log_rate_limit_details(e.response, model=chat.llm_model, context=f"for scheduled summary in chat {chat_id}")
+                
                 error_msg = (
                     "❌ <b>Не удалось создать сводку: Превышен лимит запросов</b>\n\n"
                     "OpenAI вернул ошибку 429 (Too Many Requests). "
@@ -566,6 +617,9 @@ async def cmd_summary_now(message: Message):
                 result = await summarize_messages(db, ch, datetime.utcnow().replace(tzinfo=pytz.utc))
             except HTTPStatusError as e:
                 if e.response.status_code == 429:
+                    # Детальное логирование для диагностики
+                    log_rate_limit_details(e.response, model=ch.llm_model, context=f"for manual summary in chat {ch.id}")
+                    
                     error_msg = (
                         "❌ <b>Ошибка: Превышен лимит запросов к API</b>\n\n"
                         "OpenAI вернул ошибку 429 (Too Many Requests). "
