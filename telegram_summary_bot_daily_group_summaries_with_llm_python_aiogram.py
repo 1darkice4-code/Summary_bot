@@ -74,6 +74,7 @@ from sqlalchemy import (
     create_engine,
     select,
     func,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -117,12 +118,14 @@ class Chat(Base):
 
 class Msg(Base):
     __tablename__ = "messages"
-    id = Column(BigInteger, primary_key=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     chat_id = Column(BigInteger, index=True)
+    message_id = Column(BigInteger, index=True)  # Telegram message_id
     user_id = Column(BigInteger, index=True)
     username = Column(String(255), default="")
     text = Column(Text)
     created_at = Column(DateTime, index=True, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint('chat_id', 'message_id', name='uq_chat_message'),)
 
 class RunLog(Base):
     __tablename__ = "runs"
@@ -444,9 +447,19 @@ async def on_group_text(message: Message):
     db = SessionLocal()
     try:
         ensure_chat(db, message.chat.id, message.chat.title or "")
+        # Проверяем, не существует ли уже это сообщение (избегаем дубликатов)
+        existing = db.execute(
+            select(Msg).where(
+                Msg.chat_id == message.chat.id,
+                Msg.message_id == message.message_id
+            )
+        ).scalar_one_or_none()
+        if existing:
+            return  # Сообщение уже сохранено
+        
         rec = Msg(
-            id=message.message_id + int(message.chat.id) * 10_000_000_000,  # make globally unique
             chat_id=message.chat.id,
+            message_id=message.message_id,
             user_id=message.from_user.id if message.from_user else 0,
             username=("@" + message.from_user.username) if (message.from_user and message.from_user.username) else (message.from_user.full_name if message.from_user else ""),
             text=message.text or "",
@@ -454,6 +467,9 @@ async def on_group_text(message: Message):
         )
         db.add(rec)
         db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"Failed to save message: {e}")
     finally:
         db.close()
 
