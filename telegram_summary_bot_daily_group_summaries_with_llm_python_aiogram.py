@@ -55,6 +55,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Tuple
 
 import pytz
+from httpx import HTTPStatusError
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatType, ParseMode
@@ -138,7 +139,7 @@ class RunLog(Base):
 Base.metadata.create_all(engine)
 
 # -------------------- LLM Provider --------------------
-async def call_llm(prompt: str, model: Optional[str] = None) -> str:
+async def call_llm(prompt: str, model: Optional[str] = None, max_retries: int = 3) -> str:
     model = model or LLM_MODEL
     if LLM_PROVIDER == "openai":
         if not OPENAI_API_KEY:
@@ -155,11 +156,66 @@ async def call_llm(prompt: str, model: Optional[str] = None) -> str:
             ],
             "temperature": 0.3,
         }
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
-            r.raise_for_status()
-            data = r.json()
-            return data["choices"][0]["message"]["content"].strip()
+        
+        # Retry logic с exponential backoff для 429 ошибок
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    r = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
+                    
+                    # Обработка 429 (Too Many Requests) с retry
+                    if r.status_code == 429:
+                        if attempt < max_retries - 1:
+                            # Exponential backoff: 2^attempt секунд, но не более 60 секунд
+                            wait_time = min(2 ** attempt, 60)
+                            # Также проверяем заголовок Retry-After, если он есть
+                            retry_after = r.headers.get("Retry-After")
+                            if retry_after:
+                                try:
+                                    wait_time = int(retry_after)
+                                except ValueError:
+                                    pass
+                            logger.warning(f"Rate limit hit (429). Retrying in {wait_time} seconds... (attempt {attempt + 1}/{max_retries})")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            raise HTTPStatusError(
+                                "Rate limit exceeded. Please try again later.",
+                                request=r.request,
+                                response=r
+                            )
+                    
+                    r.raise_for_status()
+                    data = r.json()
+                    return data["choices"][0]["message"]["content"].strip()
+                    
+            except HTTPStatusError as e:
+                last_error = e
+                if e.response.status_code == 429 and attempt < max_retries - 1:
+                    # Уже обработано выше
+                    continue
+                elif e.response.status_code >= 500:
+                    # Server errors - retry
+                    if attempt < max_retries - 1:
+                        wait_time = min(2 ** attempt, 30)
+                        logger.warning(f"Server error {e.response.status_code}. Retrying in {wait_time} seconds... (attempt {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                        continue
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = min(2 ** attempt, 30)
+                    logger.warning(f"Error calling LLM: {e}. Retrying in {wait_time} seconds... (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait_time)
+                    continue
+                raise
+        
+        # Если все попытки исчерпаны
+        if last_error:
+            raise last_error
+        raise RuntimeError("Failed to call LLM after all retries")
     else:
         # Minimal stub to extend for other providers (OpenRouter, Anthropic)
         raise NotImplementedError(f"LLM provider {LLM_PROVIDER} not implemented in this sample")
@@ -303,7 +359,55 @@ async def post_daily_summary(chat_id: int):
         chat = db.get(Chat, chat_id)
         if chat is None:
             return
-        summary = await summarize_messages(db, chat, datetime.utcnow().replace(tzinfo=pytz.utc))
+        try:
+            summary = await summarize_messages(db, chat, datetime.utcnow().replace(tzinfo=pytz.utc))
+        except HTTPStatusError as e:
+            error_msg = ""
+            if e.response.status_code == 429:
+                error_msg = (
+                    "❌ <b>Не удалось создать сводку: Превышен лимит запросов</b>\n\n"
+                    "OpenAI вернул ошибку 429 (Too Many Requests). "
+                    "Сводка будет создана при следующем запуске."
+                )
+                logger.error(f"Rate limit error for scheduled summary in chat {chat_id}")
+            elif e.response.status_code >= 500:
+                error_msg = (
+                    "❌ <b>Не удалось создать сводку: Проблема на стороне API</b>\n\n"
+                    "Сервер OpenAI временно недоступен. Сводка будет создана при следующем запуске."
+                )
+                logger.error(f"Server error for scheduled summary in chat {chat_id}: {e}")
+            else:
+                error_msg = (
+                    f"❌ <b>Не удалось создать сводку</b>\n\n"
+                    f"Ошибка API (код: {e.response.status_code}). "
+                    f"Сводка будет создана при следующем запуске."
+                )
+                logger.error(f"API error for scheduled summary in chat {chat_id}: {e}")
+            
+            if error_msg:
+                try:
+                    await bot.send_message(chat_id=chat_id, text=error_msg)
+                except Exception as send_error:
+                    logger.error(f"Failed to send error message to chat {chat_id}: {send_error}")
+            
+            db.add(RunLog(chat_id=chat_id, success=False, details=f"HTTP {e.response.status_code}: {str(e)}"))
+            db.commit()
+            return
+        except Exception as e:
+            logger.exception(f"Summary job failed for chat {chat_id}")
+            error_msg = (
+                f"❌ <b>Не удалось создать сводку</b>\n\n"
+                f"Произошла ошибка: {str(e)[:200]}\n"
+                f"Сводка будет создана при следующем запуске."
+            )
+            try:
+                await bot.send_message(chat_id=chat_id, text=error_msg)
+            except Exception as send_error:
+                logger.error(f"Failed to send error message to chat {chat_id}: {send_error}")
+            db.add(RunLog(chat_id=chat_id, success=False, details=str(e)))
+            db.commit()
+            return
+            
         if not summary:
             logger.info(f"No content to summarize for chat {chat_id}")
             return
@@ -312,9 +416,12 @@ async def post_daily_summary(chat_id: int):
         db.add(RunLog(chat_id=chat_id, success=True))
         db.commit()
     except Exception as e:
-        logger.exception("Summary job failed")
-        db.add(RunLog(chat_id=chat_id, success=False, details=str(e)))
-        db.commit()
+        logger.exception(f"Unexpected error in post_daily_summary for chat {chat_id}")
+        try:
+            db.add(RunLog(chat_id=chat_id, success=False, details=str(e)))
+            db.commit()
+        except:
+            pass
     finally:
         db.close()
 
@@ -433,7 +540,39 @@ async def cmd_summary_now(message: Message):
     try:
         ch = ensure_chat(db, message.chat.id, message.chat.title or "")
         async with ChatActionSender(bot=bot, chat_id=message.chat.id, action="typing"):
-            result = await summarize_messages(db, ch, datetime.utcnow().replace(tzinfo=pytz.utc))
+            try:
+                result = await summarize_messages(db, ch, datetime.utcnow().replace(tzinfo=pytz.utc))
+            except HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    await message.reply(
+                        "❌ <b>Ошибка: Превышен лимит запросов к API</b>\n\n"
+                        "OpenAI вернул ошибку 429 (Too Many Requests). "
+                        "Пожалуйста, подождите немного и попробуйте снова через несколько минут."
+                    )
+                    logger.error(f"Rate limit error for chat {ch.id}: {e}")
+                elif e.response.status_code >= 500:
+                    await message.reply(
+                        "❌ <b>Ошибка: Проблема на стороне API</b>\n\n"
+                        "Сервер OpenAI временно недоступен. Попробуйте позже."
+                    )
+                    logger.error(f"Server error for chat {ch.id}: {e}")
+                else:
+                    await message.reply(
+                        f"❌ <b>Ошибка при создании сводки</b>\n\n"
+                        f"Код ошибки: {e.response.status_code}\n"
+                        f"Попробуйте позже или проверьте настройки API ключа."
+                    )
+                    logger.error(f"API error for chat {ch.id}: {e}")
+                return
+            except Exception as e:
+                await message.reply(
+                    f"❌ <b>Ошибка при создании сводки</b>\n\n"
+                    f"Произошла непредвиденная ошибка: {str(e)}\n"
+                    f"Попробуйте позже или обратитесь к администратору."
+                )
+                logger.exception(f"Unexpected error for chat {ch.id}")
+                return
+            
         if not result:
             await message.reply("За последние 24 часа нечего суммировать.")
             return
