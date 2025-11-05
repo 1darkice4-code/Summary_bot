@@ -56,7 +56,8 @@ from typing import List, Optional, Tuple
 
 import pytz
 from aiogram import Bot, Dispatcher, F
-from aiogram.enums import ChatType
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ChatType, ParseMode
 from aiogram.filters import Command
 from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
@@ -268,7 +269,7 @@ async def summarize_messages(db, chat: Chat, now_utc: datetime) -> Optional[str]
     return final
 
 # -------------------- Bot Setup --------------------
-bot = Bot(BOT_TOKEN, parse_mode="HTML")
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone=pytz.utc)
 
