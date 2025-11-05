@@ -250,6 +250,8 @@ async def summarize_messages(db, chat: Chat, now_utc: datetime) -> Optional[str]
     if len(partials) == 1:
         return partials[0]
 
+    # Выносим join за пределы f-string, так как в f-string нельзя использовать \n
+    partials_text = "\n\n".join(partials)
     merged_prompt = textwrap.dedent(f"""
     You will receive several partial summaries from different segments of the same group chat conversation covering the last 24 hours. Merge them into one cohesive daily summary in Russian with:
     - Topic groups with short headings
@@ -260,7 +262,7 @@ async def summarize_messages(db, chat: Chat, now_utc: datetime) -> Optional[str]
     Keep it within ~300-500 words.
 
     === PARTIAL SUMMARIES ===
-    {"\n\n".join(partials)}
+    {partials_text}
     """)
     final = await call_llm(merged_prompt, model=chat.llm_model)
     return final
