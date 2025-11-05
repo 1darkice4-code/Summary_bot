@@ -180,12 +180,10 @@ async def call_llm(prompt: str, model: Optional[str] = None, max_retries: int = 
                             await asyncio.sleep(wait_time)
                             continue
                         else:
-                            raise HTTPStatusError(
-                                "Rate limit exceeded. Please try again later.",
-                                request=r.request,
-                                response=r
-                            )
+                            # Все попытки исчерпаны - вызываем raise_for_status для правильного HTTPStatusError
+                            r.raise_for_status()
                     
+                    # Проверяем статус для всех остальных ответов
                     r.raise_for_status()
                     data = r.json()
                     return data["choices"][0]["message"]["content"].strip()
@@ -544,24 +542,39 @@ async def cmd_summary_now(message: Message):
                 result = await summarize_messages(db, ch, datetime.utcnow().replace(tzinfo=pytz.utc))
             except HTTPStatusError as e:
                 if e.response.status_code == 429:
-                    await message.reply(
+                    error_msg = (
                         "❌ <b>Ошибка: Превышен лимит запросов к API</b>\n\n"
                         "OpenAI вернул ошибку 429 (Too Many Requests). "
                         "Пожалуйста, подождите немного и попробуйте снова через несколько минут."
                     )
+                    try:
+                        await message.reply(error_msg)
+                        logger.info(f"Sent rate limit error message to chat {ch.id}")
+                    except Exception as send_err:
+                        logger.error(f"Failed to send error message to chat {ch.id}: {send_err}")
                     logger.error(f"Rate limit error for chat {ch.id}: {e}")
                 elif e.response.status_code >= 500:
-                    await message.reply(
+                    error_msg = (
                         "❌ <b>Ошибка: Проблема на стороне API</b>\n\n"
                         "Сервер OpenAI временно недоступен. Попробуйте позже."
                     )
+                    try:
+                        await message.reply(error_msg)
+                        logger.info(f"Sent server error message to chat {ch.id}")
+                    except Exception as send_err:
+                        logger.error(f"Failed to send error message to chat {ch.id}: {send_err}")
                     logger.error(f"Server error for chat {ch.id}: {e}")
                 else:
-                    await message.reply(
+                    error_msg = (
                         f"❌ <b>Ошибка при создании сводки</b>\n\n"
                         f"Код ошибки: {e.response.status_code}\n"
                         f"Попробуйте позже или проверьте настройки API ключа."
                     )
+                    try:
+                        await message.reply(error_msg)
+                        logger.info(f"Sent API error message to chat {ch.id}")
+                    except Exception as send_err:
+                        logger.error(f"Failed to send error message to chat {ch.id}: {send_err}")
                     logger.error(f"API error for chat {ch.id}: {e}")
                 return
             except Exception as e:
