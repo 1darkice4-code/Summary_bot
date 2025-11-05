@@ -96,6 +96,8 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///summarybot.db")
 DEFAULT_TZ = os.getenv("DEFAULT_TZ", "Asia/Bangkok")
 DEFAULT_SUMMARY_TIME = os.getenv("DEFAULT_SUMMARY_TIME", "23:00")  # HH:MM 24h
 MAX_SOURCE_CHARS = int(os.getenv("MAX_SOURCE_CHARS", "20000"))
+MAX_CHUNKS = int(os.getenv("MAX_CHUNKS", "5"))  # Максимальное количество chunks
+CHUNK_DELAY = float(os.getenv("CHUNK_DELAY", "1.5"))  # Задержка между запросами к API (секунды)
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")  # openai | openrouter | anthropic (extensible)
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -285,6 +287,19 @@ async def summarize_messages(db, chat: Chat, now_utc: datetime) -> Optional[str]
 
     src = "\n".join(lines)
     chunks = chunk_text(src, chat.max_source_chars)
+    
+    # Ограничиваем количество chunks для предотвращения превышения лимитов API
+    if len(chunks) > MAX_CHUNKS:
+        # Если chunks слишком много, увеличиваем размер chunk'а
+        logger.warning(f"Too many chunks ({len(chunks)}), reducing to {MAX_CHUNKS} chunks")
+        chunk_size = len(src) // MAX_CHUNKS + 1000
+        chunks = chunk_text(src, chunk_size)
+        if len(chunks) > MAX_CHUNKS:
+            # Если все еще слишком много, берем только первые MAX_CHUNKS
+            chunks = chunks[:MAX_CHUNKS]
+            logger.warning(f"Still too many chunks, using first {MAX_CHUNKS} chunks only")
+    
+    logger.info(f"Processing {len(chunks)} chunk(s) for chat {chat.id}, total messages: {len(rows)}")
 
     # Two-stage summarization for long chats
     partials: List[str] = []
@@ -302,14 +317,22 @@ async def summarize_messages(db, chat: Chat, now_utc: datetime) -> Optional[str]
         {chunk}
         === CHAT PART END ===
         """)
+        logger.info(f"Calling LLM for chunk {idx}/{len(chunks)}")
         partial = await call_llm(prompt, model=chat.llm_model)
         partials.append(partial)
+        
+        # Добавляем задержку между запросами (кроме последнего chunk'а)
+        # Это помогает избежать rate limiting
+        if idx < len(chunks):
+            logger.debug(f"Waiting {CHUNK_DELAY} seconds before next chunk request")
+            await asyncio.sleep(CHUNK_DELAY)
 
     if len(partials) == 1:
         return partials[0]
 
     # Выносим join за пределы f-string, так как в f-string нельзя использовать \n
     partials_text = "\n\n".join(partials)
+    logger.info(f"Merging {len(partials)} partial summaries")
     merged_prompt = textwrap.dedent(f"""
     You will receive several partial summaries from different segments of the same group chat conversation covering the last 24 hours. Merge them into one cohesive daily summary in Russian with:
     - Topic groups with short headings
@@ -323,6 +346,7 @@ async def summarize_messages(db, chat: Chat, now_utc: datetime) -> Optional[str]
     {partials_text}
     """)
     final = await call_llm(merged_prompt, model=chat.llm_model)
+    logger.info(f"Summary completed for chat {chat.id}")
     return final
 
 # -------------------- Bot Setup --------------------
