@@ -1,10 +1,6 @@
-# Переменные окружения
-.env
-
-# База данных SQLite
-*.db
-*.db-journal
-data/
+# Git
+.git
+.gitignore
 
 # Python
 __pycache__/
@@ -41,4 +37,18 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db
+
+# База данных (будет создана в контейнере)
+*.db
+*.db-journal
+data/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Документация
+README.md
+*.md
 

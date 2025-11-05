@@ -45,9 +45,43 @@ Telegram-бот для автоматического создания ежед�
 
 ### 3. Запуск
 
+#### Вариант A: Запуск без Docker
+
 ```bash
 python telegram_summary_bot_daily_group_summaries_with_llm_python_aiogram.py
 ```
+
+#### Вариант B: Запуск с Docker (рекомендуется)
+
+1. Создайте директорию для данных (если используете SQLite):
+   ```bash
+   mkdir data
+   ```
+
+2. Запустите через Docker Compose:
+   ```bash
+   docker-compose up -d
+   ```
+
+   Или соберите и запустите вручную:
+   ```bash
+   docker build -t telegram-summary-bot .
+   docker run -d --name telegram-summary-bot --env-file .env -v ./data:/app/data telegram-summary-bot
+   ```
+
+3. Просмотр логов:
+   ```bash
+   docker-compose logs -f
+   # или
+   docker logs -f telegram-summary-bot
+   ```
+
+4. Остановка:
+   ```bash
+   docker-compose down
+   # или
+   docker stop telegram-summary-bot
+   ```
 
 ### 4. Добавление в группу
 
@@ -69,11 +103,20 @@ python telegram_summary_bot_daily_group_summaries_with_llm_python_aiogram.py
 ## Развертывание
 
 Бот должен работать как долго живущий процесс. Подходит для:
-- VPS/VDS
+- VPS/VDS (с Docker)
 - Railway
 - Render
 - Fly.io
 - Heroku
+- Любой хостинг с поддержкой Docker
+
+### Docker на продакшене
+
+Для продакшена рекомендуется:
+1. Использовать PostgreSQL вместо SQLite (раскомментируйте секцию в `docker-compose.yml`)
+2. Настроить volume для персистентного хранения данных
+3. Использовать Docker Compose для управления сервисами
+4. Настроить автоматический перезапуск через `restart: unless-stopped`
 
 ## Примечания
 

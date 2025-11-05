@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: telegram-summary-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Монтируем директорию для базы данных SQLite (если используется)
+      - ./data:/app/data
+      # Опционально: монтируем .env для удобства редактирования
+      - ./.env:/app/.env:ro
+    environment:
+      # Переопределяем путь к БД для SQLite в контейнере
+      - DATABASE_URL=sqlite:///data/summarybot.db
+    # Если используете PostgreSQL, раскомментируйте:
+    # depends_on:
+    #   - postgres
+    # environment:
+    #   - DATABASE_URL=postgresql+psycopg2://botuser:botpass@postgres:5432/botdb
+
+  # Опционально: PostgreSQL для продакшена
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: telegram-bot-postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: botuser
+  #     POSTGRES_PASSWORD: botpass
+  #     POSTGRES_DB: botdb
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+
+# volumes:
+#   postgres_data:
+
